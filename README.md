@@ -24,11 +24,13 @@ conda install -c conda-forge jupyterlab ipywidgets jupyterlab_widgets
 Use `fetch-gdelt.py` to download GDELT v1 data (daily aggregated data). This version provides historical daily data from 1979 onwards with a 1-day delay.
 
 **Activate conda environment first:**
+
 ```bash
 conda activate ba
 ```
 
 **Basic usage:**
+
 ```bash
 # Fetch from specific date to today
 python fetch-gdelt.py --start 2025-12-01
@@ -59,6 +61,7 @@ python fetch-gdelt.py --start 2025-12-01 -d ./my-data
 ```
 
 **Features:**
+
 - **Parallel downloading**: Downloads multiple files simultaneously (default: 5 workers)
 - **Resume support**: Automatically skips already downloaded files
 - **Date range**: Flexible date selection with `--start` and `--end` flags
@@ -67,6 +70,7 @@ python fetch-gdelt.py --start 2025-12-01 -d ./my-data
 - **Progress tracking**: Real-time progress bars with tqdm showing download status
 
 **Output:**
+
 - Files are saved in `data/` directory by default
 - Format: `YYYYMMDD000000.export.CSV` (events) or `YYYYMMDD000000.gkg.csv` (GKG)
 - Compatible with `collect-gdelt.py` for merging
@@ -144,6 +148,7 @@ jupyter lab eda.ipynb
 The GDELT v1 dataset consists of two main file types:
 
 1. **Export Files** (Events) - 61 columns with event data including actors, locations, event codes, sentiment scores
+
    - Daily aggregated data
    - Covers 1979 onwards
    - File format: `YYYYMMDD000000.export.CSV`
@@ -158,6 +163,7 @@ See [`GDELT_DATASET_GUIDE.md`](GDELT_DATASET_GUIDE.md) for complete field descri
 ## GDELT v1 vs v2
 
 **GDELT v1 (Daily)** - Used by this project:
+
 - ✅ Daily aggregated data (1-day delay)
 - ✅ Historical coverage from 1979
 - ✅ Lower data volume
@@ -166,6 +172,7 @@ See [`GDELT_DATASET_GUIDE.md`](GDELT_DATASET_GUIDE.md) for complete field descri
 - ❌ No mentions table
 
 **GDELT v2 (Real-time):**
+
 - ✅ 15-minute updates
 - ✅ Includes mentions table
 - ✅ More detailed event tracking

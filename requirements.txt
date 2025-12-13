@@ -6,3 +6,4 @@ gdelt
 tqdm
 scikit-learn
 torch
+matplotlib
