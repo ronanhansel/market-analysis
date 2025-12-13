@@ -18,6 +18,9 @@ from pathlib import Path
 from datetime import datetime
 import argparse
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+import threading
 
 # GDELT column definitions based on official documentation
 # These columns were determined by examining the actual data structure
@@ -51,6 +54,13 @@ GKG_COLUMNS = [
     'Amounts', 'TranslationInfo', 'Extras'
 ]
 
+# GKG 1.0 columns (2013-2015, 15 columns)
+GKG_V1_COLUMNS = [
+    'GKGRECORDID', 'DATE', 'SourceCollectionIdentifier', 'SourceCommonName',
+    'DocumentIdentifier', 'Counts', 'Themes', 'Locations', 'Persons',
+    'Organizations', 'Tone', 'Dates', 'GCAM', 'SharingImage', 'Extras'
+]
+
 MENTIONS_COLUMNS = [
     'GLOBALEVENTID', 'EventTimeDate', 'MentionTimeDate', 'MentionType',
     'MentionSourceName', 'MentionIdentifier', 'SentenceID', 'Actor1CharOffset',
@@ -62,11 +72,33 @@ MENTIONS_COLUMNS = [
 class GDELTProcessor:
     """Process and merge GDELT data files"""
     
-    def __init__(self, data_dir='.'):
+    def __init__(self, data_dir='.', max_workers=8, last_n=None):
         self.data_dir = Path(data_dir)
         self.export_files = sorted(glob.glob(str(self.data_dir / '*.export.CSV')))
         self.gkg_files = sorted(glob.glob(str(self.data_dir / '*.gkg.csv')))
         self.mentions_files = sorted(glob.glob(str(self.data_dir / '*.mentions.CSV')))
+        self.max_workers = max_workers
+        
+        # Limit to last N files if specified
+        if last_n is not None and last_n > 0:
+            self.export_files = self.export_files[-last_n:]
+            self.gkg_files = self.gkg_files[-last_n:]
+            self.mentions_files = self.mentions_files[-last_n:]
+        
+        # Market-related themes to filter
+        self.market_themes = {
+            'ECON_STOCKMARKET',
+            'ECON_FINANCIAL_MARKETS',
+            'ECON_DEBT',
+            'ECON_CURRENCY_EXCHANGE_RATE',
+            'ECON_INFLATION',
+            'CRISISLEX_CRISISLEXREC'
+        }
+        
+        # Thread-safe counter
+        self.stats_lock = threading.Lock()
+        self.total_rows_read = 0
+        self.total_rows_filtered = 0
         
     def show_info(self):
         """Display information about available GDELT files"""
@@ -146,36 +178,176 @@ class GDELTProcessor:
         
         return None
     
-    def merge_gkg_files(self, output_file='merged_gkg.csv'):
-        """Merge all GKG files into a single CSV"""
+    def detect_gkg_version(self, file):
+        """
+        Detect GKG file version by counting columns in first line
+        
+        Returns:
+            str: 'v1' or 'v2'
+        """
+        try:
+            with open(file, 'r', encoding='utf-8') as f:
+                first_line = f.readline()
+                num_cols = len(first_line.split('\t'))
+                # GKG 1.0 has 15 columns, GKG 2.0 has 27 columns
+                return 'v1' if num_cols <= 15 else 'v2'
+        except Exception:
+            # Default to v2 for newer files
+            return 'v2'
+    
+    def filter_market_themes(self, themes_str):
+        """
+        Check if themes string contains any market-related themes
+        
+        Args:
+            themes_str: String containing semicolon-separated themes
+            
+        Returns:
+            bool: True if any market theme is found
+        """
+        if pd.isna(themes_str):
+            return False
+        
+        themes_str = str(themes_str).upper()
+        return any(theme in themes_str for theme in self.market_themes)
+    
+    def read_and_filter_gkg_file(self, file):
+        """
+        Read a single GKG file, extract target columns, and filter by market themes
+        Handles both GKG 1.0 and 2.0 formats
+        
+        Args:
+            file: Path to GKG file
+            
+        Returns:
+            DataFrame or None: Filtered dataframe with only target columns
+        """
+        try:
+            # Detect version
+            version = self.detect_gkg_version(file)
+            
+            if version == 'v1':
+                # GKG 1.0: DATE, SourceCommonName, Themes, Tone, Organizations
+                # Indices: 1, 3, 6, 10, 9
+                target_cols = [1, 3, 6, 10, 9]
+                col_names = ['DATE', 'SourceCommonName', 'Themes', 'Tone', 'Organizations']
+            else:
+                # GKG 2.0: DATE, SourceCommonName, V2Themes, V2Tone, V2Organizations
+                # Indices: 1, 3, 8, 15, 14
+                target_cols = [1, 3, 8, 15, 14]
+                col_names = ['DATE', 'SourceCommonName', 'V2Themes', 'V2Tone', 'V2Organizations']
+            
+            # Read only the columns we need
+            df = pd.read_csv(
+                file, 
+                sep='\t', 
+                header=None, 
+                usecols=target_cols,
+                names=col_names,
+                low_memory=False, 
+                encoding='utf-8',
+                on_bad_lines='skip'
+            )
+            
+            rows_before = len(df)
+            
+            # Filter by market themes (handle both Themes and V2Themes)
+            themes_col = 'Themes' if version == 'v1' else 'V2Themes'
+            df = df[df[themes_col].apply(self.filter_market_themes)]
+            
+            # Normalize column names to v2 format for consistency
+            if version == 'v1':
+                df = df.rename(columns={
+                    'Themes': 'V2Themes',
+                    'Tone': 'V2Tone',
+                    'Organizations': 'V2Organizations'
+                })
+            
+            rows_after = len(df)
+            
+            with self.stats_lock:
+                self.total_rows_read += rows_before
+                self.total_rows_filtered += rows_after
+            
+            return df if len(df) > 0 else None
+            
+        except Exception as e:
+            tqdm.write(f"  ✗ Error reading {Path(file).name}: {e}")
+            return None
+    
+    def merge_gkg_files(self, output_file='merged_gkg_filtered.csv'):
+        """
+        Merge all GKG files with parallel processing and market theme filtering
+        Only extracts columns: DATE, SourceCommonName, V2Themes, V2Tone, V2Organizations
+        Only keeps rows containing market-related themes
+        """
         if not self.gkg_files:
             print("No GKG files found!")
             return None
             
-        print(f"\nMerging {len(self.gkg_files)} GKG files...")
+        print(f"\n{'='*70}")
+        print(f"Merging {len(self.gkg_files)} GKG files (Optimized Mode)")
+        print(f"{'='*70}")
+        print(f"Target Columns: DATE, SourceCommonName, V2Themes, V2Tone, V2Organizations")
+        print(f"Filtering by themes: {', '.join(sorted(self.market_themes))}")
+        print(f"Parallel Workers: {self.max_workers}")
+        print(f"Note: Automatically handles both GKG 1.0 (2013-2015) and 2.0 (2015+) formats")
+        print(f"{'='*70}\n")
+        
+        # Reset stats
+        self.total_rows_read = 0
+        self.total_rows_filtered = 0
+        
         dfs = []
         
-        for i, file in enumerate(self.gkg_files, 1):
-            print(f"  [{i}/{len(self.gkg_files)}] Reading {Path(file).name}...", end=' ')
-            try:
-                df = pd.read_csv(file, sep='\t', header=None, names=GKG_COLUMNS,
-                                low_memory=False, encoding='utf-8')
-                dfs.append(df)
-                print(f"✓ ({len(df):,} rows)")
-            except Exception as e:
-                print(f"✗ Error: {e}")
-                
+        # Process files in parallel with progress bar
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all tasks
+            futures = {executor.submit(self.read_and_filter_gkg_file, file): file 
+                      for file in self.gkg_files}
+            
+            # Process completed tasks with progress bar
+            with tqdm(total=len(self.gkg_files), desc="Processing GKG files", unit="file") as pbar:
+                for future in as_completed(futures):
+                    file = futures[future]
+                    try:
+                        df = future.result()
+                        if df is not None and len(df) > 0:
+                            dfs.append(df)
+                            tqdm.write(f"  ✓ {Path(file).name}: {len(df):,} rows (market-related)")
+                        else:
+                            tqdm.write(f"  ⊘ {Path(file).name}: No market-related rows")
+                    except Exception as e:
+                        tqdm.write(f"  ✗ Exception for {Path(file).name}: {e}")
+                    
+                    pbar.update(1)
+        
         if dfs:
+            print(f"\n{'='*70}")
+            print("Concatenating and deduplicating...")
+            print(f"{'='*70}")
+            
             merged_df = pd.concat(dfs, ignore_index=True)
-            merged_df = merged_df.drop_duplicates(subset=['GKGRECORDID'], keep='last')
-            print(f"\nTotal records: {len(merged_df):,} (after deduplication)")
+            
+            # Remove duplicates based on DATE and DocumentIdentifier (implicit in content)
+            rows_before_dedup = len(merged_df)
+            merged_df = merged_df.drop_duplicates()
+            rows_after_dedup = len(merged_df)
+            
+            print(f"\nTotal rows read: {self.total_rows_read:,}")
+            print(f"Rows after filtering: {self.total_rows_filtered:,} ({100*self.total_rows_filtered/max(self.total_rows_read,1):.2f}%)")
+            print(f"Duplicates removed: {rows_before_dedup - rows_after_dedup:,}")
+            print(f"Final records: {rows_after_dedup:,}")
             
             output_path = self.data_dir / output_file
             merged_df.to_csv(output_path, index=False)
-            print(f"Saved to: {output_path}")
+            print(f"\n✓ Saved to: {output_path}")
+            print(f"  File size: {output_path.stat().st_size / (1024*1024):.1f} MB")
+            
             return merged_df
-        
-        return None
+        else:
+            print("\n✗ No market-related data found in any files!")
+            return None
     
     def merge_mentions_files(self, output_file='merged_mentions.csv'):
         """Merge all mentions files into a single CSV"""
@@ -297,6 +469,10 @@ Examples:
                        help='Export merged CSV files to Parquet format')
     parser.add_argument('-d', '--data-dir', type=str, default='.',
                        help='Directory containing GDELT files (default: current directory)')
+    parser.add_argument('-w', '--workers', type=int, default=8,
+                       help='Number of parallel workers for processing (default: 8)')
+    parser.add_argument('--last', type=int, default=None,
+                       help='Process only the last N files (useful for testing)')
     
     args = parser.parse_args()
     
@@ -305,7 +481,7 @@ Examples:
         parser.print_help()
         sys.exit(0)
     
-    processor = GDELTProcessor(args.data_dir)
+    processor = GDELTProcessor(args.data_dir, max_workers=args.workers, last_n=args.last)
     
     if args.info:
         processor.show_info()
