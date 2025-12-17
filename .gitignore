@@ -6,4 +6,3 @@ venv/
 .ipynb_aml_checkpoints/
 __pycache__/
 .DS_Store
-results/

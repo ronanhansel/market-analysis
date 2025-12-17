@@ -22,8 +22,6 @@ This repository implements a comprehensive machine learning study testing whethe
 
 **Quick Links:**
 
-- 🚀 **[QUICKSTART.md](QUICKSTART.md)** — Get results in 5 minutes
-- 📊 **[VISUAL_SUMMARY.md](VISUAL_SUMMARY.md)** — Key results with tables and charts
 - 📖 **[COMPREHENSIVE_REPORT.md](COMPREHENSIVE_REPORT.md)** — Complete project documentation ⭐
 - 📚 **[GDELT_DATASET_GUIDE.md](GDELT_DATASET_GUIDE.md)** — GDELT dataset structure reference
 - 🎨 **[presentation.ipynb](presentation.ipynb)** — Interactive results dashboard
