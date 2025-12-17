@@ -2,7 +2,9 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, classification_report, precision_score, confusion_matrix
+from sklearn.metrics import accuracy_score, classification_report, precision_score, confusion_matrix, brier_score_loss
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 import torch
 import torch.nn as nn
@@ -64,6 +66,57 @@ def plot_feature_importance(importances, ticker, title="Feature Importance"):
     plt.xlabel("Importance")
     plt.tight_layout()
     save_plot(plt.gcf(), f"feature_importance_{ticker}.png")
+
+def plot_calibration_curve_func(y_true, probs, ticker, title="Calibration Curve"):
+    fraction_of_positives, mean_predicted_value = calibration_curve(y_true, probs, n_bins=10)
+    
+    plt.figure(figsize=(8, 6))
+    plt.plot(mean_predicted_value, fraction_of_positives, "s-", label="Model")
+    plt.plot([0, 1], [0, 1], "k--", label="Perfectly Calibrated")
+    plt.ylabel("Fraction of positives")
+    plt.xlabel("Mean predicted value")
+    plt.title(f"{title} - {ticker}")
+    plt.legend(loc="lower right")
+    plt.grid(True, alpha=0.3)
+    save_plot(plt.gcf(), f"calibration_{title.lower().replace(' ', '_')}_{ticker}.png")
+
+def calculate_trading_metrics(equity_curve):
+    """Calculates Sharpe, MaxDD, Win Rate, Profit Factor from equity curve."""
+    equity = pd.Series(equity_curve)
+    returns = equity.pct_change().dropna()
+    
+    if len(returns) == 0:
+        return {
+            'Sharpe': 0, 'MaxDD': 0, 'WinRate': 0, 'ProfitFactor': 0
+        }
+    
+    # Sharpe Ratio (Annualized, assuming daily data)
+    # Risk-free rate = 0
+    mean_ret = returns.mean()
+    std_ret = returns.std()
+    sharpe = (mean_ret / std_ret * np.sqrt(252)) if std_ret > 0 else 0
+    
+    # Max Drawdown
+    cummax = equity.cummax()
+    drawdown = (equity - cummax) / cummax
+    max_dd = drawdown.min()
+    
+    # Win Rate
+    wins = returns[returns > 0]
+    losses = returns[returns < 0]
+    win_rate = len(wins) / len(returns) if len(returns) > 0 else 0
+    
+    # Profit Factor
+    gross_profit = wins.sum()
+    gross_loss = abs(losses.sum())
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
+    
+    return {
+        'Sharpe': sharpe,
+        'MaxDD': max_dd,
+        'WinRate': win_rate,
+        'ProfitFactor': profit_factor
+    }
 
 def load_and_process_data(filepath, ticker='SPX'):
     print(f"Loading data from {filepath} for {ticker}...")
@@ -173,15 +226,27 @@ def get_feature_sets():
 
 # === Models ===
 
-def train_rf(X_train, y_train, X_test, y_test):
+def train_rf(X_train, y_train, X_test, y_test, calibrate=False):
     print(f"Class Balance (Train): {y_train.value_counts(normalize=True).to_dict()}")
-    model = RandomForestClassifier(
+    base_model = RandomForestClassifier(
         n_estimators=300,
         max_depth=4, # Shallower tree to capture broad trends
         min_samples_leaf=20, 
-        random_state=RANDOM_SEED, # RF handles its own seeding
+        random_state=RANDOM_SEED,
         n_jobs=-1
     )
+    
+    if calibrate:
+        # Use TimeSeriesSplit for calibration to respect temporal order if possible, 
+        # but CalibratedClassifierCV with cv=int does stratified k-fold.
+        # To respect time, we can just fit on training data if we assume stationarity within train,
+        # or use a custom CV. For simplicity and robustness, we'll use standard CV here 
+        # as it's a common practice even in finance for calibration, or we could use 'prefit' 
+        # if we had a validation set. Let's use standard CV=5.
+        model = CalibratedClassifierCV(base_model, method='sigmoid', cv=5)
+    else:
+        model = base_model
+        
     model.fit(X_train, y_train)
     preds = model.predict(X_test)
     probs = model.predict_proba(X_test)[:, 1]
@@ -328,7 +393,10 @@ def run_experiment():
         # === CRITICAL FIX: RESET SEEDS HERE ===
         # This ensures that 'SPX' gets the exact same random initialization 
         # as it did in the single-file version, regardless of iteration order.
-        set_seeds(RANDOM_SEED) 
+        np.random.seed(RANDOM_SEED)
+        torch.manual_seed(RANDOM_SEED)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(RANDOM_SEED)
         
         try:
             # 1. Load
@@ -352,7 +420,8 @@ def run_experiment():
             print("\n--- Running Base Model (RF) ---")
             preds_base_rf, probs_base_rf, _ = train_rf(
                 train_df[base_feats], train_df['Target'],
-                test_df[base_feats], test_df['Target']
+                test_df[base_feats], test_df['Target'],
+                calibrate=True
             )
             acc_base_rf = accuracy_score(test_df['Target'], preds_base_rf)
             print(f"Base RF Accuracy: {acc_base_rf:.2%}")
@@ -361,16 +430,45 @@ def run_experiment():
             print("\n--- Running Sentiment Model (RF) ---")
             preds_sent_rf, probs_sent_rf, model_sent_rf = train_rf(
                 train_df[all_feats], train_df['Target'],
-                test_df[all_feats], test_df['Target']
+                test_df[all_feats], test_df['Target'],
+                calibrate=True
             )
             acc_sent_rf = accuracy_score(test_df['Target'], preds_sent_rf)
             print(f"Sentiment RF Accuracy: {acc_sent_rf:.2%}")
             
+            # Calibration & Brier Score (Sentiment RF)
+            brier_sent_rf = brier_score_loss(test_df['Target'], probs_sent_rf)
+            print(f"Sentiment RF Brier Score: {brier_sent_rf:.4f}")
+            plot_calibration_curve_func(test_df['Target'], probs_sent_rf, ticker, title="Calibration Curve (RF Sentiment)")
+            
             # Feature Importance
-            importances = pd.Series(model_sent_rf.feature_importances_, index=all_feats).sort_values(ascending=False)
-            print("\nTop 5 Features (Sentiment RF):")
-            print(importances.head(5))
-            plot_feature_importance(importances, ticker)
+            # CalibratedClassifierCV wraps the base estimator.
+            # We need to access the base estimator to get feature importances.
+            # In newer sklearn, 'calibrated_classifiers_' holds the fitted classifiers.
+            if hasattr(model_sent_rf, 'calibrated_classifiers_'):
+                 # Average importances across folds
+                 imps = []
+                 for clf in model_sent_rf.calibrated_classifiers_:
+                     # clf is a CalibratedClassifierCV._CalibratedClassifier in some versions or just the estimator
+                     # In recent sklearn, clf has 'estimator' attribute which is the fitted base estimator
+                     if hasattr(clf, 'estimator') and hasattr(clf.estimator, 'feature_importances_'):
+                         imps.append(clf.estimator.feature_importances_)
+                     elif hasattr(clf, 'base_estimator') and hasattr(clf.base_estimator, 'feature_importances_'):
+                         imps.append(clf.base_estimator.feature_importances_)
+                         
+                 if imps:
+                     avg_imps = np.mean(imps, axis=0)
+                     importances = pd.Series(avg_imps, index=all_feats).sort_values(ascending=False)
+                     print("\nTop 5 Features (Sentiment RF):")
+                     print(importances.head(5))
+                     plot_feature_importance(importances, ticker)
+            else:
+                # Fallback if not calibrated or standard RF
+                if hasattr(model_sent_rf, 'feature_importances_'):
+                    importances = pd.Series(model_sent_rf.feature_importances_, index=all_feats).sort_values(ascending=False)
+                    print("\nTop 5 Features (Sentiment RF):")
+                    print(importances.head(5))
+                    plot_feature_importance(importances, ticker)
 
             # === Experiment 3: Base Model (LSTM) ===
             print("\n--- Running Base Model (LSTM) ---")
@@ -409,32 +507,54 @@ def run_experiment():
             bh_return = (equity_bh[-1] - 1) * 100
             print(f"Buy & Hold: {bh_return:.2f}%")
             equity_curves['Buy & Hold'] = equity_bh
-            metrics.append({'Ticker': ticker, 'Model': 'Buy & Hold', 'Accuracy': np.nan, 'Return': bh_return})
+            
+            m_bh = calculate_trading_metrics(equity_bh)
+            m_bh.update({'Ticker': ticker, 'Model': 'Buy & Hold', 'Accuracy': np.nan, 'Return': bh_return})
+            metrics.append(m_bh)
             
             # RF Base
             equity_base_rf, ret_base_rf = backtest_strategy(actual_returns, preds_base_rf, "Base RF")
             print(f"Base RF:    {ret_base_rf:.2f}%")
             equity_curves['Base RF'] = equity_base_rf
-            metrics.append({'Ticker': ticker, 'Model': 'Base RF', 'Accuracy': acc_base_rf, 'Return': ret_base_rf})
+            
+            m_base_rf = calculate_trading_metrics(equity_base_rf)
+            m_base_rf.update({'Ticker': ticker, 'Model': 'Base RF', 'Accuracy': acc_base_rf, 'Return': ret_base_rf})
+            metrics.append(m_base_rf)
             
             # RF Sentiment
             equity_sent_rf, ret_sent_rf = backtest_strategy(actual_returns, preds_sent_rf, "Sent RF")
             print(f"Sent RF:    {ret_sent_rf:.2f}%")
             equity_curves['Sent RF'] = equity_sent_rf
-            metrics.append({'Ticker': ticker, 'Model': 'Sent RF', 'Accuracy': acc_sent_rf, 'Return': ret_sent_rf})
+            
+            m_sent_rf = calculate_trading_metrics(equity_sent_rf)
+            m_sent_rf.update({'Ticker': ticker, 'Model': 'Sent RF', 'Accuracy': acc_sent_rf, 'Return': ret_sent_rf})
+            metrics.append(m_sent_rf)
             
             # LSTM Base
             lstm_returns = actual_returns[SEQ_LEN:]
             equity_base_lstm, ret_base_lstm = backtest_strategy(lstm_returns, preds_base_lstm, "Base LSTM")
             print(f"Base LSTM:  {ret_base_lstm:.2f}%")
             equity_curves['Base LSTM'] = [np.nan]*SEQ_LEN + equity_base_lstm
-            metrics.append({'Ticker': ticker, 'Model': 'Base LSTM', 'Accuracy': acc_base_lstm, 'Return': ret_base_lstm})
+            
+            m_base_lstm = calculate_trading_metrics(equity_base_lstm)
+            m_base_lstm.update({'Ticker': ticker, 'Model': 'Base LSTM', 'Accuracy': acc_base_lstm, 'Return': ret_base_lstm})
+            metrics.append(m_base_lstm)
             
             # LSTM Sentiment
             equity_sent_lstm, ret_sent_lstm = backtest_strategy(lstm_returns, preds_sent_lstm, "Sent LSTM")
             print(f"Sent LSTM:  {ret_sent_lstm:.2f}%")
             equity_curves['Sent LSTM'] = [np.nan]*SEQ_LEN + equity_sent_lstm
-            metrics.append({'Ticker': ticker, 'Model': 'Sent LSTM', 'Accuracy': acc_sent_lstm, 'Return': ret_sent_lstm})
+            
+            m_sent_lstm = calculate_trading_metrics(equity_sent_lstm)
+            m_sent_lstm.update({'Ticker': ticker, 'Model': 'Sent LSTM', 'Accuracy': acc_sent_lstm, 'Return': ret_sent_lstm})
+            metrics.append(m_sent_lstm)
+            
+            # === Incremental Value Test (RF) ===
+            delta_sharpe = m_sent_rf['Sharpe'] - m_base_rf['Sharpe']
+            delta_pf = m_sent_rf['ProfitFactor'] - m_base_rf['ProfitFactor']
+            print(f"\nIncremental Value (RF Sentiment vs Base):")
+            print(f"Delta Sharpe: {delta_sharpe:.4f}")
+            print(f"Delta Profit Factor: {delta_pf:.4f}")
             
             all_metrics.extend(metrics)
 
