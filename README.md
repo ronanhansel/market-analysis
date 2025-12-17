@@ -15,6 +15,7 @@ CONDA_PLUGINS_AUTO_ACCEPT_TOS=yes conda create -n ba python=3.10 -y
 conda activate ba
 pip install -r requirements.txt
 conda install -c conda-forge jupyterlab ipywidgets jupyterlab_widgets
+conda install -y plotly nbformat
 ```
 
 ## GDELT Data Workflow
