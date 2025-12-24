@@ -9,6 +9,7 @@ from sklearn.preprocessing import StandardScaler
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
+from statsmodels.tsa.arima.model import ARIMA
 import warnings
 import os
 import traceback
@@ -307,6 +308,50 @@ def train_lstm(X_train, y_train, X_test, y_test, input_dim):
         
     return preds, probs, model
 
+def train_arima(price_train, price_test, order=(5, 1, 0)):
+    """
+    Train ARIMA model for price prediction.
+    Returns predictions (1=up, 0=down) and probabilities.
+    """
+    print(f"Training ARIMA with order {order}...")
+    
+    preds = []
+    probs = []
+    
+    # Walk-forward validation
+    history = list(price_train)
+    
+    for i in range(len(price_test)):
+        try:
+            # Fit ARIMA model
+            model = ARIMA(history, order=order)
+            model_fit = model.fit()
+            
+            # Forecast next value
+            forecast = model_fit.forecast(steps=1)[0]
+            
+            # Predict direction (1=up, 0=down)
+            current_price = history[-1]
+            pred = 1 if forecast > current_price else 0
+            preds.append(pred)
+            
+            # Calculate probability based on forecast magnitude
+            price_change = (forecast - current_price) / current_price
+            prob = 1 / (1 + np.exp(-price_change * 10))  # Sigmoid transformation
+            probs.append(prob)
+            
+            # Update history with actual value
+            history.append(price_test.iloc[i])
+            
+        except Exception as e:
+            print(f"ARIMA forecast error at step {i}: {e}")
+            # Use previous prediction or default
+            preds.append(0)
+            probs.append(0.5)
+            history.append(price_test.iloc[i])
+    
+    return np.array(preds), np.array(probs)
+
 def backtest_strategy(returns, preds, strategy_name):
     # Align lengths (LSTM loses SEQ_LEN data points)
     min_len = min(len(returns), len(preds))
@@ -493,6 +538,16 @@ def run_experiment():
             acc_sent_lstm = accuracy_score(y_test_lstm, preds_sent_lstm)
             print(f"Sentiment LSTM Accuracy: {acc_sent_lstm:.2%}")
 
+            # === Experiment 5: ARIMA ===
+            print("\n--- Running ARIMA Model ---")
+            preds_arima, probs_arima = train_arima(
+                train_df['Close'], 
+                test_df['Close'],
+                order=(5, 1, 0)
+            )
+            acc_arima = accuracy_score(test_df['Target'], preds_arima)
+            print(f"ARIMA Accuracy: {acc_arima:.2%}")
+
             # === Backtesting ===
             print("\n=== Backtest Results (Cumulative Return) ===")
             actual_returns = test_df['Return'].values
@@ -548,6 +603,15 @@ def run_experiment():
             m_sent_lstm = calculate_trading_metrics(equity_sent_lstm)
             m_sent_lstm.update({'Ticker': ticker, 'Model': 'Sent LSTM', 'Accuracy': acc_sent_lstm, 'Return': ret_sent_lstm})
             metrics.append(m_sent_lstm)
+            
+            # ARIMA
+            equity_arima, ret_arima = backtest_strategy(actual_returns, preds_arima, "ARIMA")
+            print(f"ARIMA:      {ret_arima:.2f}%")
+            equity_curves['ARIMA'] = equity_arima
+            
+            m_arima = calculate_trading_metrics(equity_arima)
+            m_arima.update({'Ticker': ticker, 'Model': 'ARIMA', 'Accuracy': acc_arima, 'Return': ret_arima})
+            metrics.append(m_arima)
             
             # === Incremental Value Test (RF) ===
             delta_sharpe = m_sent_rf['Sharpe'] - m_base_rf['Sharpe']
