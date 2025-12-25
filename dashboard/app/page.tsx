@@ -13,6 +13,7 @@ import {
   ArrowRight,
   Target,
   ShieldAlert,
+  Info,
 } from "lucide-react";
 
 // --- REAL MODEL PERFORMANCE DATA FROM RESULTS ---
@@ -446,18 +447,29 @@ const MetricCard = ({
   subtext,
   icon: Icon,
   colorClass = "text-gray-900",
+  tooltip,
 }: {
   title: string;
   value: string;
   subtext?: string;
   icon: any;
   colorClass?: string;
+  tooltip?: string;
 }) => (
-  <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow">
+  <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow group relative">
     <div className="flex items-center justify-between mb-3">
       <div className="p-3 rounded-lg bg-indigo-50">
         <Icon className="w-6 h-6 text-indigo-600" />
       </div>
+      {tooltip && (
+        <div className="relative">
+          <Info className="w-4 h-4 text-gray-400 hover:text-indigo-600 cursor-help transition-colors" />
+          <div className="absolute right-0 top-6 w-64 bg-gray-900 text-white text-xs rounded-lg p-3 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-10 shadow-xl">
+            {tooltip}
+            <div className="absolute -top-1 right-2 w-2 h-2 bg-gray-900 transform rotate-45"></div>
+          </div>
+        </div>
+      )}
     </div>
     <h3 className="text-gray-500 text-sm font-medium uppercase tracking-wide mb-1">
       {title}
@@ -611,11 +623,78 @@ export default function App() {
                 </div>
               </div>
               <ArrowRight className="w-6 h-6 text-gray-400" />
-              <div className="text-center">
+              <div className="text-center h-full">
                 <div className="text-sm text-gray-500 mb-1">
                   Suggested Action
                 </div>
                 <ActionBadge action={data.action} />
+              </div>
+            </div>
+          </div>
+
+          {/* Action Rule Transparency */}
+          <div className="mt-4 bg-gray-50 border border-gray-200 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <Info className="w-4 h-4 text-gray-600 mt-0.5 flex-shrink-0" />
+              <div className="flex-1">
+                <h4 className="text-xs font-semibold text-gray-700 mb-2">
+                  Action Rule Applied
+                </h4>
+                <div className="text-xs text-gray-600 space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono bg-white px-2 py-0.5 rounded border border-gray-300">
+                      {data.bestModel}
+                    </span>
+                    <span>→</span>
+                    <span className="font-semibold">
+                      Return: {data.bestReturn.toFixed(2)}%
+                    </span>
+                    <span>|</span>
+                    <span className="font-semibold">
+                      Sharpe: {data.models[data.bestModel].sharpe.toFixed(2)}
+                    </span>
+                    <span>|</span>
+                    <span className="font-semibold">
+                      MaxDD: {data.models[data.bestModel].maxDD.toFixed(2)}%
+                    </span>
+                  </div>
+                  <div className="text-gray-500 mt-2">
+                    {data.action === "STRONG BUY" && (
+                      <>
+                        <strong>Rule:</strong> Return &gt; 100% AND Sharpe ≥ 1.5
+                        AND MaxDD ≥ -30% → Exceptional risk-adjusted performance
+                      </>
+                    )}
+                    {data.action === "BUY" && (
+                      <>
+                        <strong>Rule:</strong> Return ≥ 20% AND Sharpe ≥ 0.8 →
+                        Strong positive returns with favorable risk profile
+                      </>
+                    )}
+                    {data.action === "ACCUMULATE" && (
+                      <>
+                        <strong>Rule:</strong> Return ≥ 5% → Positive momentum,
+                        moderate accumulation suggested
+                      </>
+                    )}
+                    {data.action === "HOLD" && (
+                      <>
+                        <strong>Rule:</strong> Return between -5% and 5% OR
+                        insufficient signal strength → Maintain current positions
+                      </>
+                    )}
+                    {data.action === "SELL" && (
+                      <>
+                        <strong>Rule:</strong> Return &lt; -5% OR negative
+                        risk-adjusted metrics → Consider reducing exposure
+                      </>
+                    )}
+                  </div>
+                  <div className="text-gray-400 mt-2 italic">
+                    Action adjusted by GDELT sentiment ({data.sentiment}) for
+                    additional market context validation.
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -631,12 +710,6 @@ export default function App() {
             subtext={`Using ${data.bestModel}`}
             icon={TrendingUp}
             colorClass={isPositive ? "text-green-600" : "text-red-600"}
-          />
-          <MetricCard
-            title="Market Sentiment"
-            value={data.sentiment}
-            subtext="Based on GDELT analysis"
-            icon={Activity}
           />
           <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow">
             <div className="flex items-center justify-between mb-3">
@@ -680,92 +753,92 @@ export default function App() {
             </div>
           </div>
           <MetricCard
+            title="Market Sentiment"
+            value={data.sentiment}
+            subtext="Based on GDELT analysis"
+            icon={Activity}
+          />
+          <MetricCard
             title="Sharpe Ratio"
-            value={data.models[data.bestModel].sharpe.toFixed(2)}
+            value={data.models[
+              data.bestModel as keyof typeof data.models
+            ].sharpe.toFixed(2)}
             subtext="Risk-adjusted return"
             icon={BarChart2}
             colorClass="text-indigo-600"
           />
         </div>
 
-        {/* Model Performance Comparison */}
+        {/* Model Return & Performance Comparison */}
         <div className="bg-white rounded-xl shadow-lg p-8 mb-8">
           <div className="flex items-center gap-3 mb-6">
             <Briefcase className="w-6 h-6 text-indigo-600" />
             <h2 className="text-2xl font-bold text-gray-900">
-              Model Performance Comparison
+              Model Return & Performance Comparison
             </h2>
           </div>
-          <div className="space-y-3">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
             {Object.entries(data.models)
               .sort(([, a], [, b]) => (b as any).return - (a as any).return)
-              .map(([modelName, metrics]) => (
-                <ModelBar
-                  key={modelName}
-                  name={modelName}
-                  score={(metrics as any).return}
-                  isWinner={modelName === data.bestModel}
-                />
-              ))}
-          </div>
-
-          {/* Additional Metrics Table */}
-          <div className="mt-8 overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-200">
-                  <th className="text-left py-3 px-4 font-semibold text-gray-700">
-                    Model
-                  </th>
-                  <th className="text-right py-3 px-4 font-semibold text-gray-700">
-                    Return
-                  </th>
-                  <th className="text-right py-3 px-4 font-semibold text-gray-700">
-                    Sharpe
-                  </th>
-                  <th className="text-right py-3 px-4 font-semibold text-gray-700">
-                    Win Rate
-                  </th>
-                  <th className="text-right py-3 px-4 font-semibold text-gray-700">
-                    Max DD
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(data.models).map(([modelName, metrics]) => {
-                  const m = metrics as any;
-                  return (
-                    <tr
-                      key={modelName}
-                      className={`border-b border-gray-100 ${
-                        modelName === data.bestModel ? "bg-indigo-50" : ""
-                      }`}
-                    >
-                      <td className="py-3 px-4 font-medium text-gray-900">
+              .map(([modelName, metrics]) => {
+                const m = metrics as any;
+                const isWinner = modelName === data.bestModel;
+                return (
+                  <div
+                    key={modelName}
+                    className={`relative p-4 rounded-lg border ${
+                      isWinner
+                        ? "bg-indigo-50 border-indigo-300 ring-2 ring-indigo-200"
+                        : "bg-white border-gray-200"
+                    } hover:shadow-md transition-all`}
+                  >
+                    {isWinner && (
+                      <div className="absolute -top-2 -right-2">
+                        <div className="bg-yellow-400 rounded-full p-1.5">
+                          <Target className="w-4 h-4 text-yellow-900" />
+                        </div>
+                      </div>
+                    )}
+                    <div className="text-center">
+                      <div
+                        className={`text-xs font-semibold mb-2 ${
+                          isWinner ? "text-indigo-900" : "text-gray-600"
+                        }`}
+                      >
                         {modelName}
-                      </td>
-                      <td
-                        className={`py-3 px-4 text-right font-semibold ${
+                      </div>
+                      <div
+                        className={`text-2xl font-bold mb-3 ${
                           m.return >= 0 ? "text-green-600" : "text-red-600"
                         }`}
                       >
                         {m.return >= 0 ? "+" : ""}
-                        {m.return.toFixed(2)}%
-                      </td>
-                      <td className="py-3 px-4 text-right text-gray-700">
-                        {m.sharpe.toFixed(2)}
-                      </td>
-                      <td className="py-3 px-4 text-right text-gray-700">
-                        {m.winRate.toFixed(1)}%
-                      </td>
-                      <td className="py-3 px-4 text-right text-red-600">
-                        {m.maxDD.toFixed(2)}%
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                        {m.return.toFixed(1)}%
+                      </div>
+                      <div className="space-y-1 text-xs text-gray-600">
+                        <div className="flex justify-between">
+                          <span>Sharpe:</span>
+                          <span className="font-semibold">
+                            {m.sharpe.toFixed(2)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span>Win:</span>
+                          <span className="font-semibold">
+                            {m.winRate.toFixed(0)}%
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span>MaxDD:</span>
+                          <span className="font-semibold text-red-600">
+                            {m.maxDD.toFixed(1)}%
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
           </div>
         </div>
 
@@ -815,11 +888,6 @@ export default function App() {
                     losses may exceed these values. Models showing negative
                     returns demonstrate real risk exposure.
                   </p>
-                  <p className="font-semibold">
-                    This is an academic project for educational purposes only.
-                    Not financial advice. Consult a licensed financial advisor
-                    before making investment decisions.
-                  </p>
                 </div>
               </div>
             </div>
@@ -836,7 +904,7 @@ export default function App() {
                 <div className="text-sm text-blue-700 space-y-2">
                   <p>
                     <strong>Return:</strong> Total percentage gain/loss over the
-                    test period (May 2023 - present).
+                    test period (May 2013 - present).
                   </p>
                   <p>
                     <strong>Sharpe Ratio:</strong> Risk-adjusted returns (higher
@@ -870,14 +938,17 @@ export default function App() {
               <h3 className="font-semibold text-indigo-900 mb-1">
                 Business Analytics Capstone Project
               </h3>
+
               <p className="text-sm text-indigo-700">
-                This dashboard presents AI-powered market analysis using
-                sentiment analysis from GDELT news data combined with machine
-                learning models including LSTM networks and Random Forest
-                classifiers. Models are evaluated on historical market data (May
-                2023 - December 2024) to provide quantitative investment
-                insights. Data sources: Stooq historical prices, GDELT Global
-                Knowledge Graph.
+                This dashboard presents market analysis using sentiment analysis
+                from GDELT news data combined with machine learning models
+                including LSTM, ARIMA networks and Random Forest classifiers.
+                Models are evaluated on historical market data (May 2013 -
+                December 2025) to provide quantitative investment insights.
+              </p>
+              <p className="text-xs mt-2 w-full text-indigo-700 font-mono">
+                Data sources: Stooq historical prices, GDELT Global Knowledge
+                Graph.
               </p>
             </div>
           </div>
