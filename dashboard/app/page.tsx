@@ -16,8 +16,21 @@ import {
   Info,
 } from "lucide-react";
 
-// --- REAL MODEL PERFORMANCE DATA FROM RESULTS ---
-const MODEL_PERFORMANCE = {
+// Company revenue data (static - not in model metrics)
+const COMPANY_DATA: Record<string, { revenue: string; revenueGrowth: string }> =
+  {
+    AAPL: { revenue: "394.3B", revenueGrowth: "2.0" },
+    MSFT: { revenue: "211.9B", revenueGrowth: "13.0" },
+    NVDA: { revenue: "60.9B", revenueGrowth: "126.0" },
+    DAX: { revenue: "N/A", revenueGrowth: "N/A" },
+    DJI: { revenue: "N/A", revenueGrowth: "N/A" },
+    NDX: { revenue: "N/A", revenueGrowth: "N/A" },
+    NKX: { revenue: "N/A", revenueGrowth: "N/A" },
+    SPX: { revenue: "N/A", revenueGrowth: "N/A" },
+  };
+
+// Initial placeholder - will be populated from CSV
+const MODEL_PERFORMANCE_INITIAL = {
   AAPL: {
     symbol: "AAPL",
     name: "Apple Inc.",
@@ -416,6 +429,113 @@ const SYMBOLS = [
 ] as const;
 type SymbolKey = (typeof SYMBOLS)[number];
 
+// Helper function to determine action based on metrics
+function determineAction(
+  bestReturn: number,
+  sharpe: number,
+  maxDD: number
+): string {
+  if (bestReturn > 100 && sharpe >= 1.5 && maxDD >= -30) return "STRONG BUY";
+  if (bestReturn >= 20 && sharpe >= 0.8) return "BUY";
+  if (bestReturn >= 5) return "ACCUMULATE";
+  if (bestReturn < -5) return "SELL";
+  return "HOLD";
+}
+
+// Helper function to determine sentiment
+function determineSentiment(action: string): string {
+  const sentimentMap: Record<string, string> = {
+    "STRONG BUY": "Highly Bullish",
+    BUY: "Bullish",
+    ACCUMULATE: "Cautiously Optimistic",
+    HOLD: "Neutral",
+    SELL: "Bearish",
+  };
+  return sentimentMap[action] || "Neutral";
+}
+
+// Helper to parse CSV
+function parseCSV(csvText: string) {
+  const lines = csvText.trim().split("\n");
+  const headers = lines[0].split(",");
+  return lines.slice(1).map((line) => {
+    const values = line.split(",");
+    const obj: any = {};
+    headers.forEach((header, i) => {
+      obj[header] = values[i];
+    });
+    return obj;
+  });
+}
+
+// Load model performance from CSV
+async function loadModelPerformance() {
+  try {
+    const response = await fetch("/model_metrics.csv");
+    if (!response.ok) throw new Error("Failed to load metrics");
+
+    const csvText = await response.text();
+    const data = parseCSV(csvText);
+
+    const performance: any = {};
+
+    // Group by ticker
+    SYMBOLS.forEach((ticker) => {
+      const tickerData = data.filter((row: any) => row.Ticker === ticker);
+      if (tickerData.length === 0) return;
+
+      const models: any = {};
+      let bestModel = "";
+      let bestReturn = -Infinity;
+
+      tickerData.forEach((row: any) => {
+        const modelName = row.Model;
+        const returnVal = parseFloat(row.Return);
+        const sharpe = parseFloat(row.Sharpe);
+        const maxDD = parseFloat(row.MaxDD) * 100;
+        const winRate = parseFloat(row.WinRate) * 100;
+
+        models[modelName] = {
+          return: returnVal,
+          sharpe: sharpe,
+          winRate: winRate,
+          maxDD: maxDD,
+        };
+
+        // Track best model (exclude Buy & Hold)
+        if (modelName !== "Buy & Hold" && returnVal > bestReturn) {
+          bestReturn = returnVal;
+          bestModel = modelName;
+        }
+      });
+
+      const bestModelMetrics = models[bestModel];
+      const action = determineAction(
+        bestReturn,
+        bestModelMetrics.sharpe,
+        bestModelMetrics.maxDD
+      );
+
+      performance[ticker] = {
+        symbol: ticker,
+        name: ticker, // Could be enhanced with full names
+        bestModel: bestModel,
+        bestReturn: bestReturn,
+        models: models,
+        action: action,
+        sentiment: determineSentiment(action),
+        revenue: COMPANY_DATA[ticker]?.revenue || "N/A",
+        revenueGrowth: COMPANY_DATA[ticker]?.revenueGrowth || "N/A",
+      };
+    });
+
+    return performance;
+  } catch (error) {
+    console.error("Error loading model performance:", error);
+    return MODEL_PERFORMANCE_INITIAL;
+  }
+}
+
 // --- COMPONENTS ---
 
 // Action Badge Component
@@ -539,6 +659,10 @@ export default function App() {
   const [selectedSymbol, setSelectedSymbol] = useState<SymbolKey>("AAPL");
   const [currentDate, setCurrentDate] = useState("");
   const [mounted, setMounted] = useState(false);
+  const [modelPerformance, setModelPerformance] = useState<any>(
+    MODEL_PERFORMANCE_INITIAL
+  );
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     setMounted(true);
@@ -551,14 +675,46 @@ export default function App() {
         day: "numeric",
       })
     );
+
+    // Load model performance data
+    loadModelPerformance().then((data) => {
+      setModelPerformance(data);
+      setLoading(false);
+    });
   }, []);
 
   const data = useMemo(
-    () => MODEL_PERFORMANCE[selectedSymbol],
-    [selectedSymbol]
+    () => modelPerformance[selectedSymbol],
+    [selectedSymbol, modelPerformance]
   );
 
-  if (!mounted) return null;
+  if (!mounted || loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="text-2xl font-bold text-gray-900 mb-2">
+            Loading Dashboard...
+          </div>
+          <div className="text-gray-500">Fetching model performance data</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="text-2xl font-bold text-red-600 mb-2">
+            Data Not Available
+          </div>
+          <div className="text-gray-500">
+            Please run modelling.py to generate results
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const isPositive = data.bestReturn >= 0;
 
@@ -651,11 +807,18 @@ export default function App() {
                     </span>
                     <span>|</span>
                     <span className="font-semibold">
-                      Sharpe: {data.models[data.bestModel].sharpe.toFixed(2)}
+                      Sharpe:{" "}
+                      {data.models[
+                        data.bestModel as keyof typeof data.models
+                      ].sharpe.toFixed(2)}
                     </span>
                     <span>|</span>
                     <span className="font-semibold">
-                      MaxDD: {data.models[data.bestModel].maxDD.toFixed(2)}%
+                      MaxDD:{" "}
+                      {data.models[
+                        data.bestModel as keyof typeof data.models
+                      ].maxDD.toFixed(2)}
+                      %
                     </span>
                   </div>
                   <div className="text-gray-500 mt-2">
@@ -680,7 +843,8 @@ export default function App() {
                     {data.action === "HOLD" && (
                       <>
                         <strong>Rule:</strong> Return between -5% and 5% OR
-                        insufficient signal strength → Maintain current positions
+                        insufficient signal strength → Maintain current
+                        positions
                       </>
                     )}
                     {data.action === "SELL" && (
@@ -949,6 +1113,34 @@ export default function App() {
               <p className="text-xs mt-2 w-full text-indigo-700 font-mono">
                 Data sources: Stooq historical prices, GDELT Global Knowledge
                 Graph.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Methodology Note */}
+        <div className="mt-6 bg-amber-50 border border-amber-200 rounded-xl p-6">
+          <div className="flex items-start gap-3">
+            <Info className="w-5 h-5 text-amber-600 mt-0.5 flex-shrink-0" />
+            <div>
+              <h3 className="font-semibold text-amber-900 mb-2">
+                Methodology Update (December 2025)
+              </h3>
+              <p className="text-sm text-amber-800">
+                Performance figures have been corrected to use{" "}
+                <strong>simple returns</strong> instead of log returns for
+                accurate compounding, and{" "}
+                <strong>proper signal-to-return alignment</strong> to eliminate
+                look-ahead bias. Previous versions unintentionally inflated
+                results by applying next-day predictions to same-day returns.
+                The corrected methodology ensures that model signals at time{" "}
+                <em>t</em> are used to trade returns at time <em>t+1</em>,
+                providing a realistic assessment of strategy performance.
+              </p>
+              <p className="text-xs mt-2 text-amber-700 italic">
+                All results shown reflect the corrected backtest methodology
+                using simple returns = (Close<sub>t</sub> / Close<sub>t-1</sub>)
+                - 1 and aligned signal execution.
               </p>
             </div>
           </div>

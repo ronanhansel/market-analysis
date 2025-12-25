@@ -97,9 +97,10 @@ def calculate_trading_metrics(equity_curve):
     std_ret = returns.std()
     sharpe = (mean_ret / std_ret * np.sqrt(252)) if std_ret > 0 else 0
     
-    # Max Drawdown
-    cummax = equity.cummax()
-    drawdown = (equity - cummax) / cummax
+    # Max Drawdown - convert to numpy for cummax
+    equity_arr = equity.values if hasattr(equity, 'values') else np.array(equity)
+    cummax = np.maximum.accumulate(equity_arr)
+    drawdown = (equity_arr - cummax) / cummax
     max_dd = drawdown.min()
     
     # Win Rate
@@ -150,8 +151,8 @@ def load_and_process_data(filepath, ticker='SPX'):
     existing_cols = [c for c in keep_cols if c in df.columns]
     df = df[existing_cols]
     
-    # Calculate Returns
-    df['Return'] = np.log(df['Close'] / df['Close'].shift(1))
+    # Calculate Returns - USE SIMPLE RETURNS FOR CORRECT BACKTEST
+    df['Return'] = df['Close'].pct_change()  # Simple returns instead of log returns
     
     # Target: Next Day Direction (1 = Up, 0 = Down)
     df['Target'] = (df['Return'].shift(-1) > 0).astype(int)
@@ -352,19 +353,37 @@ def train_arima(price_train, price_test, order=(5, 1, 0)):
     
     return np.array(preds), np.array(probs)
 
-def backtest_strategy(returns, preds, strategy_name):
-    # Align lengths (LSTM loses SEQ_LEN data points)
+def backtest_with_alignment(returns, preds, align_next_day=True):
+    """
+    Backtest strategy with proper signal-to-return alignment.
+    If align_next_day=True, preds[t] trades returns[t+1] (correct for next-day prediction).
+    """
+    returns = np.array(returns)
+    preds = np.array(preds)
+    
+    if align_next_day:
+        # Signal at t predicts return at t+1
+        returns = returns[1:]
+        preds = preds[:-1]
+    
     min_len = min(len(returns), len(preds))
-    returns = returns[-min_len:]
-    preds = preds[-min_len:]
+    returns = returns[:min_len]
+    preds = preds[:min_len]
+    
+    # Strategy returns: position (0 or 1) * actual return
+    strategy_returns = returns * preds
+    
+    return strategy_returns
+
+def backtest_strategy(returns, preds, strategy_name):
+    """
+    Wrapper that uses backtest_with_alignment and builds equity curve.
+    """
+    strategy_returns = backtest_with_alignment(returns, preds, align_next_day=True)
     
     equity = [1.0]
-    for i in range(len(returns)):
-        ret = returns[i]
-        # Strategy: If pred=1 (Up), Buy. If pred=0 (Down), Cash (0 return).
-        # Simple Long-Only strategy based on signal.
-        pos = 1 if preds[i] == 1 else 0
-        equity.append(equity[-1] * (1 + pos * ret))
+    for ret in strategy_returns:
+        equity.append(equity[-1] * (1 + ret))
         
     total_return = (equity[-1] - 1) * 100
     return equity, total_return
